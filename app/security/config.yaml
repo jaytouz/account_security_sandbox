@@ -1,0 +1,14 @@
+# Defence switches. Edit and save; the app re-reads this file on the next request.
+#
+# Everything starts OFF so Phase 3 scenarios can record a baseline.
+# Passwords are always stored with argon2 — that one is not a switch.
+# The remaining defence layers (rate limiting, lockout, breached-password
+# check, session hardening, recovery hardening, risk scoring, monitoring)
+# are added here in Phase 4.
+
+baseline:
+  # Min 12 characters and must not contain the email's local part.
+  password_policy: false
+  # Same message for "unknown account" and "wrong password", and for
+  # reset requests on unknown emails. Off = responses reveal which emails exist.
+  generic_errors: false

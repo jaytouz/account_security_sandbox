@@ -1,0 +1,81 @@
+# Account Security Lab — Phase 1 stack.
+#
+# Isolation:
+#   lab  — internal-only network (no route out). Postgres lives only here.
+#   edge — exists only so the app and mail UI can be published on 127.0.0.1.
+#          IP masquerading is off, so containers on it have no outbound internet.
+# Check with: docker compose exec app python scripts/check_isolation.py
+name: account-lab
+
+services:
+  db:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_DB: lab
+      POSTGRES_USER: lab
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lab-dev-only}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./telemetry/migrations:/docker-entrypoint-initdb.d:ro
+    networks: [lab]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lab -d lab"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  mail:
+    # Catches every email the app sends. Web UI: http://127.0.0.1:8025
+    image: axllent/mailpit:v1.20.0
+    networks: [lab, edge]
+    ports:
+      - "127.0.0.1:8025:8025"
+
+  app:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://lab:${POSTGRES_PASSWORD:-lab-dev-only}@db:5432/lab
+      SMTP_HOST: mail
+      SMTP_PORT: "1025"
+      APP_BASE_URL: http://127.0.0.1:8000
+      LAB_TRUST_SIM_HEADERS: "true"
+      SECURITY_CONFIG: /srv/app/security/config.yaml
+    volumes:
+      # Mounted so defence switches can be edited without a rebuild.
+      - ./app/security/config.yaml:/srv/app/security/config.yaml:ro
+      - ./data/out:/srv/data/out
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [lab, edge]
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  seed:
+    # One-off: docker compose run --rm seed
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    command: ["python", "-m", "data.seed", "--reset"]
+    environment:
+      DATABASE_URL: postgresql://lab:${POSTGRES_PASSWORD:-lab-dev-only}@db:5432/lab
+    volumes:
+      - ./data/out:/srv/data/out
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [lab]
+    profiles: [tools]
+
+networks:
+  lab:
+    internal: true
+  edge:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+
+volumes:
+  pgdata:
