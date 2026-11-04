@@ -1,9 +1,9 @@
 # Account Security Lab — Phase 1 stack.
 #
 # Isolation:
-#   lab  — internal-only network (no route out). Postgres lives only here.
-#   edge — exists only so the app and mail UI can be published on 127.0.0.1.
-#          IP masquerading is off, so containers on it have no outbound internet.
+#   lab  — internal-only network, no route out. db, app and mail live only here.
+#   edge — host-facing network used only by the nginx gateway, which publishes
+#          the app and mail UI on 127.0.0.1. Nothing else can reach the internet.
 # Check with: docker compose exec app python scripts/check_isolation.py
 name: account-lab
 
@@ -27,9 +27,7 @@ services:
   mail:
     # Catches every email the app sends. Web UI: http://127.0.0.1:8025
     image: axllent/mailpit:v1.20.0
-    networks: [lab, edge]
-    ports:
-      - "127.0.0.1:8025:8025"
+    networks: [lab]
 
   app:
     build:
@@ -49,9 +47,18 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    networks: [lab]
+
+  gateway:
+    # The only container with a route to the host. Strips X-Lab-Sim-* headers.
+    image: nginx:1.27.2-alpine
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on: [app, mail]
     networks: [lab, edge]
     ports:
       - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8025:8025"
 
   seed:
     # One-off: docker compose run --rm seed
@@ -74,8 +81,6 @@ networks:
     internal: true
   edge:
     driver: bridge
-    driver_opts:
-      com.docker.network.bridge.enable_ip_masquerade: "false"
 
 volumes:
   pgdata:

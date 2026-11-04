@@ -1,19 +1,21 @@
 """End-to-end check of the Phase 1 flows against the local app. Standard library only.
 
-    python scripts/smoke_test.py            # from the host, stack running
+    docker compose exec app python scripts/smoke_test.py    # inside the lab
+    python scripts/smoke_test.py                            # from the host (sim headers get stripped)
 
 Creates its own throwaway accounts (smoke-*@lab.test); does not touch seed data.
 """
 import csv
 import http.cookiejar
 import json
+import os
 import pathlib
 import secrets
 import sys
 import urllib.error
 import urllib.request
 
-BASE = "http://127.0.0.1:8000"
+BASE = os.environ.get("LAB_BASE_URL", "http://127.0.0.1:8000")
 RUN_ID = f"smoke-{secrets.token_hex(3)}"
 
 

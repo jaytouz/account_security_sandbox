@@ -5,8 +5,8 @@ A local, isolated training sandbox for practicing how to detect and respond to a
 All accounts and data are synthetic. The design is in [BUILD_PROMPT.md](BUILD_PROMPT.md).
 
 ## Isolation rules
-- The stack runs on an internal Docker network with no route out. Postgres is never published.
-- The app (`:8000`) and the mail catcher UI (`:8025`) are published on `127.0.0.1` only. Their network has IP masquerading off, so containers can't reach the internet.
+- The database, app and mail catcher run only on an internal Docker network with no route out.
+- A small nginx gateway is the only container with a host-facing network. It publishes the app (`:8000`) and the mail catcher UI (`:8025`) on `127.0.0.1` only, and strips the `X-Lab-Sim-*` headers from host requests.
 - Run the isolation check after every `up`, before running any scenario:
   ```bash
   docker compose exec app python scripts/check_isolation.py
@@ -35,7 +35,7 @@ Then:
 - Caught emails (reset tokens): http://127.0.0.1:8025
 
 ```bash
-python scripts/smoke_test.py
+docker compose exec app python scripts/smoke_test.py
 ```
 
 ## Account service (Phase 1)
@@ -58,7 +58,7 @@ python scripts/smoke_test.py
 Login result codes in `telemetry.login_event.result`: `success`, `bad_password`, `unknown_account`, `locked`, `mfa_required`, `mfa_fail`. Phase 4 adds `rate_limited` and `step_up`.
 
 ## Simulated origin headers
-Inside Docker every client shares one IP. To give events a synthetic origin, send these headers (honoured only while `LAB_TRUST_SIM_HEADERS=true`):
+Inside Docker every client shares one IP. To give events a synthetic origin, send these headers from inside the lab network (the gateway removes them from host requests, and the app honours them only while `LAB_TRUST_SIM_HEADERS=true`):
 
 | Header | Example |
 | --- | --- |
@@ -84,6 +84,7 @@ SELECT ts, email_attempted, host(ip), geo_country, device_fp, result
 
 ## Layout
 - `docker-compose.yml`: the isolated stack
+- `gateway/`: nginx config for the host-facing gateway
 - `app/`: the account service (FastAPI)
 - `app/security/`: defence switches and modules
 - `telemetry/`: schema migrations and the event write path
