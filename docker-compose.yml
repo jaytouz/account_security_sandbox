@@ -1,11 +1,17 @@
-# Account Security Lab — Phase 1 stack.
+# Account Security Lab stack.
 #
 # Isolation:
-#   lab  — internal-only network, no route out. db, app and mail live only here.
+#   lab  — internal-only network, no route out. db, app, mail and review live only here.
 #   edge — host-facing network used only by the nginx gateway, which publishes
-#          the app and mail UI on 127.0.0.1. Nothing else can reach the internet.
+#          the app, mail UI and dashboard on 127.0.0.1. Nothing else can reach the internet.
 # Check with: docker compose exec app python scripts/check_isolation.py
+#
+# Dev-only secrets below have defaults; override them in a .env file if you like.
 name: account-lab
+
+x-db-env: &db-env
+  DATABASE_URL: postgresql://lab:${POSTGRES_PASSWORD:-lab-dev-only}@db:5432/lab
+  LAB_REVIEW_DB_PASSWORD: ${LAB_REVIEW_DB_PASSWORD:-review-dev-only}
 
 services:
   db:
@@ -16,7 +22,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lab-dev-only}
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./telemetry/migrations:/docker-entrypoint-initdb.d:ro
     networks: [lab]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U lab -d lab"]
@@ -25,40 +30,62 @@ services:
       retries: 20
 
   mail:
-    # Catches every email the app sends. Web UI: http://127.0.0.1:8025
+    # Catches every email the app sends. UI via the gateway: http://127.0.0.1:8025
     image: axllent/mailpit:v1.20.0
     networks: [lab]
 
   app:
+    # Applies database migrations on startup.
     build:
       context: .
       dockerfile: app/Dockerfile
     environment:
-      DATABASE_URL: postgresql://lab:${POSTGRES_PASSWORD:-lab-dev-only}@db:5432/lab
+      <<: *db-env
       SMTP_HOST: mail
       SMTP_PORT: "1025"
       APP_BASE_URL: http://127.0.0.1:8000
       LAB_TRUST_SIM_HEADERS: "true"
+      LAB_ADMIN_TOKEN: ${LAB_ADMIN_TOKEN:-lab-admin-dev-only}
       SECURITY_CONFIG: /srv/app/security/config.yaml
     volumes:
-      # Mounted so defence switches can be edited without a rebuild.
-      - ./app/security/config.yaml:/srv/app/security/config.yaml:ro
+      # Read-write: the dashboard flips defences through the app's admin API.
+      - ./app/security/config.yaml:/srv/app/security/config.yaml
       - ./data/out:/srv/data/out
     depends_on:
       db:
         condition: service_healthy
     networks: [lab]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  review:
+    # Dashboard. Reads with the read-only lab_review role; acts through /admin.
+    build:
+      context: .
+      dockerfile: review/Dockerfile
+    environment:
+      REVIEW_DATABASE_URL: postgresql://lab_review:${LAB_REVIEW_DB_PASSWORD:-review-dev-only}@db:5432/lab
+      LAB_APP_URL: http://app:8000
+      LAB_ADMIN_TOKEN: ${LAB_ADMIN_TOKEN:-lab-admin-dev-only}
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [lab]
 
   gateway:
-    # The only container with a route to the host. Strips X-Lab-Sim-* headers.
+    # The only container with a route to the host. Blocks /admin and strips X-Lab-Sim-* headers.
     image: nginx:1.27.2-alpine
     volumes:
       - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-    depends_on: [app, mail]
+    depends_on: [app, mail, review]
     networks: [lab, edge]
     ports:
-      - "127.0.0.1:8000:8000"
-      - "127.0.0.1:8025:8025"
+      - "127.0.0.1:8000:8000"   # account service
+      - "127.0.0.1:8025:8025"   # Mailpit UI
+      - "127.0.0.1:8050:8050"   # review dashboard
 
   seed:
     # One-off: docker compose run --rm seed
@@ -67,7 +94,7 @@ services:
       dockerfile: app/Dockerfile
     command: ["python", "-m", "data.seed", "--reset"]
     environment:
-      DATABASE_URL: postgresql://lab:${POSTGRES_PASSWORD:-lab-dev-only}@db:5432/lab
+      <<: *db-env
     volumes:
       - ./data/out:/srv/data/out
     depends_on:

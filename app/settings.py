@@ -21,6 +21,10 @@ class Settings:
     security_config: str = os.environ.get(
         "SECURITY_CONFIG", os.path.join(os.path.dirname(__file__), "security", "config.yaml")
     )
+    # Shared secret for /admin (used by the review dashboard). Empty = admin API off.
+    admin_token: str = os.environ.get("LAB_ADMIN_TOKEN", "")
+    # Password for the read-only lab_review database role. Empty = role not managed.
+    review_db_password: str = os.environ.get("LAB_REVIEW_DB_PASSWORD", "")
     session_ttl_minutes: int = int(os.environ.get("SESSION_TTL_MINUTES", "720"))
     mfa_challenge_ttl_seconds: int = 300
     reset_token_ttl_minutes: int = 30

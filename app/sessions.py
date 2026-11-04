@@ -67,6 +67,19 @@ def revoke(conn: Connection, session_id, reason: str) -> None:
     events.end_session(conn, session_id=session_id, reason=reason)
 
 
+def revoke_all(conn: Connection, account_id, reason: str) -> int:
+    """Revoke every live session of an account. Returns how many were revoked."""
+    rows = conn.execute(
+        """UPDATE app.web_session SET revoked_at = clock_timestamp()
+            WHERE account_id = %s AND revoked_at IS NULL AND expires_at > clock_timestamp()
+        RETURNING session_id""",
+        (account_id,),
+    ).fetchall()
+    for r in rows:
+        events.end_session(conn, session_id=r["session_id"], reason=reason)
+    return len(rows)
+
+
 def start_mfa_challenge(conn: Connection, response: Response, account_id) -> None:
     token, token_hash = new_token()
     expires = datetime.now(timezone.utc) + timedelta(seconds=settings.mfa_challenge_ttl_seconds)

@@ -33,9 +33,16 @@ class Client:
             req.add_header(k, v)
         try:
             with self.opener.open(req, timeout=10) as r:
-                return r.status, json.loads(r.read() or b"null")
+                return r.status, _decode(r.read())
         except urllib.error.HTTPError as e:
-            return e.code, json.loads(e.read() or b"null")
+            return e.code, _decode(e.read())
+
+
+def _decode(raw: bytes):
+    try:
+        return json.loads(raw or b"null")
+    except ValueError:
+        return raw.decode(errors="replace")[:200]
 
 
 failures = 0
@@ -114,6 +121,43 @@ check("trade of an item you don't own rejected", s == 404, r)
 s, r = b.call("POST", "/auth/reset/request", {"email": eb}); check("reset request", s == 202, r)
 s, r = b.call("POST", "/auth/reset/confirm", {"token": "not-a-real-token-123", "new_password": "x" * 14})
 check("bad reset token rejected", s == 400, r)
+
+# Admin API: reachable inside the lab with the token, invisible from the host.
+ADMIN = os.environ.get("LAB_ADMIN_TOKEN")
+if ADMIN:
+    ops = Client()
+
+    def admin(method, path, body=None):
+        return ops.call(method, path, body, {"X-Lab-Admin-Token": ADMIN})
+
+    pw_b = pw.rstrip("!")
+    s, r = b.call("GET", "/auth/me"); b_id = r.get("account_id") if s == 200 else None
+    check("B logged in before admin tests", b_id is not None, r)
+
+    s, r = ops.call("GET", "/admin/defences"); check("admin API needs the token", s == 404, r)
+    s, r = admin("POST", f"/admin/accounts/{b_id}/lock")
+    check("admin lock", s == 200 and r["sessions_revoked"] >= 1, r)
+    s, r = b.call("GET", "/auth/me"); check("locked account's session ended", s == 401, r)
+    s, r = b.call("POST", "/auth/login", {"email": eb, "password": pw_b}); check("locked account can't log in", s == 403, r)
+    s, r = admin("POST", f"/admin/accounts/{b_id}/unlock"); check("admin unlock", s == 200, r)
+    s, r = b.call("POST", "/auth/login", {"email": eb, "password": pw_b}); check("login after unlock", s == 200, r)
+    s, r = admin("POST", f"/admin/accounts/{b_id}/revoke-sessions")
+    check("admin revoke sessions", s == 200 and r["sessions_revoked"] >= 1, r)
+    s, r = b.call("GET", "/auth/me"); check("revoked session rejected", s == 401, r)
+    s, r = admin("POST", f"/admin/accounts/{b_id}/force-reset"); check("admin force reset", s == 200, r)
+    s, r = b.call("POST", "/auth/login", {"email": eb, "password": pw_b}); check("old password dead after force reset", s == 401, r)
+
+    s, r = admin("GET", "/admin/defences"); check("read defences", s == 200, r)
+    before = r["baseline"]["password_policy"]
+    s, r = admin("PUT", "/admin/defences", {"flag": "baseline.password_policy", "enabled": not before})
+    check("flip a defence", s == 200 and r["baseline"]["password_policy"] is (not before), r)
+    s, r = a.call("GET", "/defences"); check("app sees the flip", r["baseline"]["password_policy"] is (not before), r)
+    s, r = admin("PUT", "/admin/defences", {"flag": "baseline.password_policy", "enabled": before})
+    check("flip it back", s == 200 and r["baseline"]["password_policy"] is before, r)
+    s, r = admin("PUT", "/admin/defences", {"flag": "baseline.nope", "enabled": True})
+    check("unknown defence rejected", s == 404, r)
+else:
+    s, r = a.call("GET", "/admin/defences"); check("admin API blocked from the host", s == 404, r)
 
 print(f"\nrun_id={RUN_ID}  (filter telemetry with: WHERE run_id = '{RUN_ID}')")
 print("PASS" if failures == 0 else f"{failures} FAILED")

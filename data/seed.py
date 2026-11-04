@@ -15,6 +15,7 @@ import psycopg
 import pyotp
 
 from app.security.passwords import hash_password
+from telemetry import migrate
 
 FIRST = ["Ada", "Bram", "Cleo", "Dov", "Esme", "Finn", "Greta", "Hugo", "Ines", "Jory",
          "Kaia", "Lior", "Mira", "Nils", "Odile", "Pax", "Quinn", "Rosa", "Sami", "Tove"]
@@ -43,6 +44,8 @@ def main() -> None:
     names = [(f, l) for f in FIRST for l in LAST]
     rng.shuffle(names)
 
+    migrate.run(os.environ["DATABASE_URL"], os.environ.get("LAB_REVIEW_DB_PASSWORD"))
+
     rows = []
     with psycopg.connect(os.environ["DATABASE_URL"]) as conn:
         if args.reset:
@@ -50,6 +53,7 @@ def main() -> None:
         if args.wipe_telemetry:
             conn.execute("TRUNCATE telemetry.login_event, telemetry.session, telemetry.account_change, "
                          "telemetry.asset_transfer, telemetry.device_fingerprint, telemetry.alert")
+            # defence_change is kept: it describes the lab, not the run.
 
         for i, (first, last) in enumerate(names[: args.accounts], start=1):
             email = f"{first}.{last}@lab.test".lower()

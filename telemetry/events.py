@@ -61,6 +61,18 @@ def record_change(conn: Connection, ctx, *, account_id, session_id, change_type:
     )
 
 
+def record_defence_state(conn: Connection, current: dict[str, bool], actor: str) -> list[str]:
+    """Log every flag whose value differs from the last one recorded. Returns the changed flags."""
+    last = {r["flag"]: r["enabled"] for r in conn.execute(
+        "SELECT DISTINCT ON (flag) flag, enabled FROM telemetry.defence_change ORDER BY flag, ts DESC"
+    ).fetchall()}
+    changed = [f for f, v in current.items() if last.get(f) != v]
+    for f in changed:
+        conn.execute("INSERT INTO telemetry.defence_change (flag, enabled, actor) VALUES (%s, %s, %s)",
+                     (f, current[f], actor))
+    return changed
+
+
 def record_transfer(conn: Connection, ctx, *, account_id, counterparty, item_id: int,
                     value_cents: int, session_id) -> None:
     conn.execute(

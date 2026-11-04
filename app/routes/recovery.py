@@ -33,6 +33,27 @@ class ResetConfirmIn(BaseModel):
     new_password: str = Field(max_length=256)
 
 
+def create_reset_token(conn, account_id) -> str:
+    token, token_hash = new_token()
+    expires = datetime.now(timezone.utc) + timedelta(minutes=settings.reset_token_ttl_minutes)
+    conn.execute(
+        "INSERT INTO app.reset_token (token_hash, account_id, expires_at) VALUES (%s, %s, %s)",
+        (token_hash, account_id, expires),
+    )
+    return token
+
+
+def send_reset_email(email: str, token: str, reason: str = "") -> bool:
+    return mailer.send(
+        email,
+        "Reset your Account Lab password",
+        (reason + "\n\n" if reason else "")
+        + f"Use this token within {settings.reset_token_ttl_minutes} minutes:\n\n{token}\n\n"
+        f"POST {settings.base_url}/auth/reset/confirm with "
+        '{"token": "<token>", "new_password": "<new password>"}\n',
+    )
+
+
 @router.post("/request", status_code=202)
 def request_reset(body: ResetRequestIn, request: Request):
     ctx = get_context(request)
@@ -44,22 +65,11 @@ def request_reset(body: ResetRequestIn, request: Request):
                 return GENERIC_RESET_REPLY
             deny(conn, 404, "unknown_account", "No account with this email.")
 
-        token, token_hash = new_token()
-        expires = datetime.now(timezone.utc) + timedelta(minutes=settings.reset_token_ttl_minutes)
-        conn.execute(
-            "INSERT INTO app.reset_token (token_hash, account_id, expires_at) VALUES (%s, %s, %s)",
-            (token_hash, acct["account_id"], expires),
-        )
+        token = create_reset_token(conn, acct["account_id"])
         events.record_change(conn, ctx, account_id=acct["account_id"], session_id=None,
                              change_type="reset_requested", channel="email")
 
-    mailer.send(
-        email,
-        "Reset your Account Lab password",
-        f"Use this token within {settings.reset_token_ttl_minutes} minutes:\n\n{token}\n\n"
-        f"POST {settings.base_url}/auth/reset/confirm with "
-        '{"token": "<token>", "new_password": "<new password>"}\n',
-    )
+    send_reset_email(email, token)
     return GENERIC_RESET_REPLY
 
 
