@@ -9,9 +9,21 @@ FAILED = "result NOT IN ('success', 'mfa_required')"
 # One row per thing that happened, across all telemetry tables.
 EVENTS = f"""
 WITH ev AS (
-    SELECT l.ts, 'login' AS kind, l.account_id, l.email_attempted AS account, l.result AS event,
+    SELECT l.ts, 'login' AS kind, l.account_id, l.email_attempted AS account,
+           l.result || CASE WHEN l.method <> 'password' THEN ' (' || l.method || ')' ELSE '' END
+                    || CASE WHEN l.risk_score > 0 THEN ' · risk ' || l.risk_score || ': '
+                                 || array_to_string(l.risk_reasons, ', ') ELSE '' END AS event,
            host(l.ip) AS ip, l.geo_country AS country, left(l.device_fp, 8) AS device, l.run_id
       FROM telemetry.login_event l
+    UNION ALL
+    SELECT r.ts, 'recovery', r.account_id, r.email_attempted, r.kind || ': ' || r.result,
+           host(r.ip), NULL, left(r.device_fp, 8), r.run_id
+      FROM telemetry.recovery_event r
+    UNION ALL
+    SELECT e.ts, 'session', e.account_id, a.email,
+           'session used from another device (expected ' || left(e.expected_device_fp, 8) || ')',
+           host(e.ip), NULL, left(e.device_fp, 8), e.run_id
+      FROM telemetry.session_event e LEFT JOIN app.account a USING (account_id)
     UNION ALL
     SELECT s.started_at, 'session', s.account_id, a.email, 'session started',
            host(s.ip), NULL, left(s.device_fp, 8), s.run_id
@@ -132,7 +144,13 @@ def accounts() -> pd.DataFrame:
 
 def account_summary(account_id: str, window: str) -> dict:
     return one("""
-        SELECT (SELECT count(*) FROM app.web_session
+        SELECT (SELECT count(*) FROM app.passkey WHERE account_id = %(id)s) AS passkeys,
+               (SELECT password_login_disabled FROM app.account WHERE account_id = %(id)s) AS passkey_only,
+               (SELECT to_char(locked_until AT TIME ZONE 'UTC', 'HH24:MI') FROM app.account
+                 WHERE account_id = %(id)s AND locked_until > now()) AS locked_until,
+               (SELECT to_char(trade_hold_until AT TIME ZONE 'UTC', 'Mon DD HH24:MI') FROM app.account
+                 WHERE account_id = %(id)s AND trade_hold_until > now()) AS trade_hold_until,
+               (SELECT count(*) FROM app.web_session
                  WHERE account_id = %(id)s AND revoked_at IS NULL AND expires_at > now()) AS live_sessions,
                (SELECT count(*) FROM telemetry.login_event
                  WHERE account_id = %(id)s AND ts > now() - %(win)s::interval
@@ -160,8 +178,8 @@ def account_timeline(account_id: str, limit: int = 300) -> pd.DataFrame:
 
 def alerts(window: str, run: str | None) -> pd.DataFrame:
     return query(f"""
-        SELECT {TS.format(col='al.ts')} AS "time (UTC)", al.severity, al.rule_id, a.email AS account,
-               al.run_id, al.evidence::text AS evidence
+        SELECT {TS.format(col='al.ts')} AS "time (UTC)", al.severity, al.rule_id, al.subject,
+               a.email AS account, al.run_id, al.evidence::text AS evidence
           FROM telemetry.alert al LEFT JOIN app.account a USING (account_id)
          WHERE al.ts > now() - %(win)s::interval AND {run_clause(run).replace('run_id', 'al.run_id')}
          ORDER BY al.ts DESC LIMIT 500""", params(window, run))
@@ -201,8 +219,30 @@ def run_breakdown(run: str) -> pd.DataFrame:
          WHERE run_id = %(run)s GROUP BY 1""", {"run": run})
 
 
+def scenario_runs(limit: int = 100) -> pd.DataFrame:
+    return query(f"""
+        SELECT run_id, scenario, {TS.format(col='started_at')} AS "started (UTC)", status,
+               (scorecard -> 'goal' ->> 'reached')::boolean AS goal_reached,
+               scorecard ->> 'verdict' AS verdict,
+               coalesce(jsonb_array_length(scorecard -> 'alerts' -> 'fired'), 0) AS alerts_fired,
+               (SELECT count(*) FROM jsonb_each(defences) WHERE value = 'true'::jsonb) AS defences_on,
+               scorecard::text AS scorecard
+          FROM telemetry.scenario_run ORDER BY started_at DESC LIMIT {int(limit)}""")
+
+
+def monitor_state() -> dict:
+    return one("""SELECT enabled, alerts_raised,
+                         round(extract(epoch FROM now() - last_eval_at)::numeric, 1) AS seconds_ago
+                    FROM telemetry.monitor_state WHERE id = 1""")
+
+
 def defences_at_run_start(run: str) -> pd.DataFrame:
-    """Each flag's last recorded value before the run's first event."""
+    """Defences in force when the run started: the scenario's snapshot, else the change history."""
+    snap = query("""SELECT key AS flag, value::text::boolean AS enabled
+                      FROM telemetry.scenario_run, jsonb_each(defences)
+                     WHERE run_id = %(run)s ORDER BY key""", {"run": run})
+    if not snap.empty:
+        return snap
     return query("""
         WITH start AS (
             SELECT min(ts) AS t FROM (

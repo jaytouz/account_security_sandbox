@@ -1,14 +1,59 @@
-# Defence switches. Edit and save; the app re-reads this file on the next request.
+# Defence switches. true = defence on.
 #
-# Everything starts OFF so Phase 3 scenarios can record a baseline.
-# Passwords are always stored with argon2 — that one is not a switch.
-# The remaining defence layers (rate limiting, lockout, breached-password
-# check, session hardening, recovery hardening, risk scoring, monitoring)
-# are added here in Phase 4.
+# Flip them from the dashboard (Defences tab) so every change is logged.
+# Everything starts off so scenarios first record a baseline.
+# Passwords are always stored with argon2; that one is not a switch.
 
 baseline:
   # Min 12 characters and must not contain the email's local part.
   password_policy: false
-  # Same message for "unknown account" and "wrong password", and for
-  # reset requests on unknown emails. Off = responses reveal which emails exist.
+  # Same reply for unknown accounts and wrong passwords, and for reset or
+  # recovery requests on unknown emails.
   generic_errors: false
+
+rate_limiting:
+  # 5 failed logins on one account in 5 minutes -> 429 until the window passes.
+  # Also caps MFA codes per challenge (5), wrong recovery answers (5 per
+  # 10 minutes) and reset emails per account (3 per 10 minutes).
+  per_account: false
+  # 20 failed logins from one IP in 5 minutes -> 429.
+  # Also caps reset requests per IP (5 per 10 minutes).
+  per_ip: false
+
+lockout:
+  # 10 wrong passwords in a row -> account locked for 15 minutes.
+  enabled: false
+
+breached_passwords:
+  # Reject passwords listed in app/security/breached_sample.txt (HIBP SHA-1 format).
+  enabled: false
+
+mfa:
+  # Email change, MFA disable, password-login change and trades need a fresh
+  # re-authentication (POST /account/reauth) within the last 10 minutes.
+  reauth_for_sensitive: false
+
+session:
+  # Cookies get Secure and SameSite=Strict.
+  secure_cookies: false
+  # Changing or resetting a password ends the account's other sessions.
+  revoke_on_password_change: false
+  # A session used from a different device fingerprint is ended.
+  bind_to_device: false
+
+recovery:
+  # Turn off security-question recovery (the weak fallback).
+  block_security_questions: false
+  # Email the account when its password, email, MFA or recovery settings change.
+  notify_on_change: false
+  # No trades for 24 hours after a password reset, email change or recovery.
+  trade_cooldown: false
+
+risk:
+  # Score each password login: new device, new country, datacenter IP,
+  # impossible travel. A score of 3 or more requires an emailed step-up code.
+  step_up: false
+
+monitoring:
+  # Run the monitoring rules and raise alerts.
+  enabled: false

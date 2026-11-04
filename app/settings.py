@@ -25,6 +25,9 @@ class Settings:
     admin_token: str = os.environ.get("LAB_ADMIN_TOKEN", "")
     # Password for the read-only lab_review database role. Empty = role not managed.
     review_db_password: str = os.environ.get("LAB_REVIEW_DB_PASSWORD", "")
+    # Passkeys need a named host: open the app at http://localhost:8000, not 127.0.0.1.
+    webauthn_rp_id: str = os.environ.get("WEBAUTHN_RP_ID", "localhost")
+    webauthn_origin: str = os.environ.get("WEBAUTHN_ORIGIN", "http://localhost:8000")
     session_ttl_minutes: int = int(os.environ.get("SESSION_TTL_MINUTES", "720"))
     mfa_challenge_ttl_seconds: int = 300
     reset_token_ttl_minutes: int = 30

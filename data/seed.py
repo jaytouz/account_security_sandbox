@@ -14,7 +14,9 @@ import secrets
 import psycopg
 import pyotp
 
+from app.routes.recovery import normalise_answer
 from app.security.passwords import hash_password
+from data.lab_constants import CITIES, ITEMS, SECURITY_QUESTION
 from telemetry import migrate
 
 FIRST = ["Ada", "Bram", "Cleo", "Dov", "Esme", "Finn", "Greta", "Hugo", "Ines", "Jory",
@@ -22,8 +24,6 @@ FIRST = ["Ada", "Bram", "Cleo", "Dov", "Esme", "Finn", "Greta", "Hugo", "Ines", 
 LAST = ["Fenwick", "Oakridge", "Marlow", "Thistle", "Vane", "Harrow", "Quill", "Ashby",
         "Brook", "Calder", "Dunmore", "Ellery", "Frost", "Gale", "Hollis", "Ivers",
         "Kestrel", "Lark", "Moss", "Nettle"]
-ITEMS = ["Copper Lantern", "Glass Compass", "Silver Key", "Amber Charm", "Iron Gauntlet",
-         "Velvet Cloak", "Jade Token", "Brass Telescope", "Opal Ring", "Oak Staff"]
 
 
 def main() -> None:
@@ -59,11 +59,13 @@ def main() -> None:
             email = f"{first}.{last}@lab.test".lower()
             password = secrets.token_urlsafe(12)
             totp_secret = pyotp.random_base32() if args.totp_every and i % args.totp_every == 0 else None
+            answer = rng.choice(CITIES)
             (account_id,) = conn.execute(
                 """INSERT INTO app.account (email, display_name, password_hash, totp_secret,
-                                            totp_enabled, is_seed)
-                   VALUES (%s, %s, %s, %s, %s, true) RETURNING account_id""",
-                (email, f"{first} {last}", hash_password(password), totp_secret, totp_secret is not None),
+                                            totp_enabled, is_seed, security_question, security_answer_hash)
+                   VALUES (%s, %s, %s, %s, %s, true, %s, %s) RETURNING account_id""",
+                (email, f"{first} {last}", hash_password(password), totp_secret, totp_secret is not None,
+                 SECURITY_QUESTION, hash_password(normalise_answer(answer))),
             ).fetchone()
             for _ in range(args.items_per_account):
                 conn.execute(
@@ -71,11 +73,11 @@ def main() -> None:
                     (account_id, rng.choice(ITEMS), rng.randrange(100, 50_000, 25)),
                 )
             rows.append({"email": email, "password": password, "totp_secret": totp_secret or "",
-                         "account_id": str(account_id)})
+                         "security_answer": answer, "account_id": str(account_id)})
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.out, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["email", "password", "totp_secret", "account_id"])
+        w = csv.DictWriter(f, fieldnames=["email", "password", "totp_secret", "security_answer", "account_id"])
         w.writeheader()
         w.writerows(rows)
     print(f"Seeded {len(rows)} accounts ({sum(1 for r in rows if r['totp_secret'])} with TOTP). "

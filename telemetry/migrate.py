@@ -19,10 +19,12 @@ _PHASE1 = ("001_app.sql", "002_telemetry.sql")
 # secrets and session/reset token hashes are deliberately left out.
 _REVIEW_COLUMNS = {
     "app.account": ["account_id", "email", "display_name", "status", "totp_enabled",
-                    "is_seed", "created_at", "password_changed_at"],
+                    "is_seed", "created_at", "password_changed_at", "failed_streak",
+                    "locked_until", "trade_hold_until", "password_login_disabled"],
     "app.web_session": ["session_id", "account_id", "created_at", "expires_at",
-                        "revoked_at", "device_fp", "ip"],
+                        "revoked_at", "device_fp", "ip", "reauth_at"],
     "app.item": ["item_id", "owner_account_id", "name", "value_cents"],
+    "app.passkey": ["account_id", "label", "created_at", "last_used_at"],
 }
 
 

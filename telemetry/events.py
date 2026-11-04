@@ -20,18 +20,40 @@ def upsert_device(conn: Connection, ctx) -> None:
 
 
 def record_login(conn: Connection, ctx, *, account_id, email_attempted: str, result: str,
-                 mfa_used: bool = False) -> int:
+                 mfa_used: bool = False, method: str = "password",
+                 risk: tuple[int, list[str]] | None = None) -> int:
     upsert_device(conn, ctx)
+    score, reasons = risk if risk else (None, None)
     row = conn.execute(
         """INSERT INTO telemetry.login_event
                (account_id, email_attempted, ip, asn, ip_type, geo_country, geo_lat, geo_lon,
-                user_agent, device_fp, mfa_used, result, run_id)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                user_agent, device_fp, mfa_used, result, run_id, method, risk_score, risk_reasons)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
            RETURNING login_event_id""",
         (account_id, email_attempted, ctx.ip, ctx.asn, ctx.ip_type, ctx.geo_country,
-         ctx.geo_lat, ctx.geo_lon, ctx.user_agent, ctx.device_fp, mfa_used, result, ctx.run_id),
+         ctx.geo_lat, ctx.geo_lon, ctx.user_agent, ctx.device_fp, mfa_used, result, ctx.run_id,
+         method, score, reasons),
     ).fetchone()
     return row["login_event_id"]
+
+
+def record_session_event(conn: Connection, ctx, *, session_id, account_id, kind: str,
+                         expected_device_fp: str | None) -> None:
+    conn.execute(
+        """INSERT INTO telemetry.session_event
+               (session_id, account_id, kind, device_fp, expected_device_fp, ip, run_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+        (session_id, account_id, kind, ctx.device_fp, expected_device_fp, ctx.ip, ctx.run_id),
+    )
+
+
+def record_recovery(conn: Connection, ctx, *, kind: str, email: str, account_id, result: str) -> None:
+    conn.execute(
+        """INSERT INTO telemetry.recovery_event
+               (kind, account_id, email_attempted, result, ip, device_fp, run_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+        (kind, account_id, email, result, ctx.ip, ctx.device_fp, ctx.run_id),
+    )
 
 
 def start_session(conn: Connection, ctx, *, session_id, account_id, login_event_id: int) -> None:

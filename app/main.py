@@ -1,12 +1,14 @@
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 
 from telemetry import events, migrate
 
 from .db import pool
-from .routes import account, admin, assets, auth, recovery
+from .routes import account, admin, assets, auth, passkeys, recovery
 from .security import flags
 from .settings import settings
 
@@ -32,15 +34,24 @@ app = FastAPI(
     title="Account Security Lab — account service",
     description="Fake account service for a local, isolated training sandbox. "
                 "All accounts and data are synthetic.",
-    version="0.2.0",
+    version="0.5.0",
     lifespan=lifespan,
 )
 
 app.include_router(auth.router)
 app.include_router(recovery.router)
 app.include_router(account.router)
+app.include_router(passkeys.router)
 app.include_router(assets.router)
 app.include_router(admin.router)
+
+_PASSKEY_PAGE = Path(__file__).parent / "static" / "passkeys.html"
+
+
+@app.get("/lab/passkeys", response_class=HTMLResponse, include_in_schema=False)
+def passkey_page():
+    """Browser test page for passkeys. Open it at http://localhost:8000/lab/passkeys."""
+    return _PASSKEY_PAGE.read_text(encoding="utf-8")
 
 
 @app.get("/health", tags=["meta"])

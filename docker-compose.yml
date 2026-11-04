@@ -1,7 +1,8 @@
 # Account Security Lab stack.
 #
 # Isolation:
-#   lab  — internal-only network, no route out. db, app, mail and review live only here.
+#   lab  — internal-only network, no route out. db, app, mail, monitor, runner and
+#          review live only here.
 #   edge — host-facing network used only by the nginx gateway, which publishes
 #          the app, mail UI and dashboard on 127.0.0.1. Nothing else can reach the internet.
 # Check with: docker compose exec app python scripts/check_isolation.py
@@ -36,6 +37,7 @@ services:
 
   app:
     # Applies database migrations on startup.
+    image: account-lab/app:local   # shared by app, monitor, runner and seed
     build:
       context: .
       dockerfile: app/Dockerfile
@@ -61,6 +63,40 @@ services:
       timeout: 5s
       retries: 20
 
+  monitor:
+    # Monitoring rules: reads telemetry every 2 s and raises alerts (when monitoring.enabled is on).
+    image: account-lab/app:local   # shared by app, monitor, runner and seed
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    command: ["python", "-m", "telemetry.monitor"]
+    environment:
+      <<: *db-env
+      SECURITY_CONFIG: /srv/app/security/config.yaml
+    volumes:
+      - ./app/security/config.yaml:/srv/app/security/config.yaml:ro
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [lab]
+
+  runner:
+    # Scenario runner. Only talks to the app on the lab network.
+    # CLI: docker compose exec runner python -m scenarios --help
+    image: account-lab/app:local   # shared by app, monitor, runner and seed
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    command: ["uvicorn", "scenarios.server:app", "--host", "0.0.0.0", "--port", "8100"]
+    environment:
+      <<: *db-env
+      LAB_APP_URL: http://app:8000
+      LAB_ADMIN_TOKEN: ${LAB_ADMIN_TOKEN:-lab-admin-dev-only}
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [lab]
+
   review:
     # Dashboard. Reads with the read-only lab_review role; acts through /admin.
     build:
@@ -69,6 +105,7 @@ services:
     environment:
       REVIEW_DATABASE_URL: postgresql://lab_review:${LAB_REVIEW_DB_PASSWORD:-review-dev-only}@db:5432/lab
       LAB_APP_URL: http://app:8000
+      LAB_RUNNER_URL: http://runner:8100
       LAB_ADMIN_TOKEN: ${LAB_ADMIN_TOKEN:-lab-admin-dev-only}
     depends_on:
       app:
@@ -89,6 +126,7 @@ services:
 
   seed:
     # One-off: docker compose run --rm seed
+    image: account-lab/app:local   # shared by app, monitor, runner and seed
     build:
       context: .
       dockerfile: app/Dockerfile

@@ -12,6 +12,7 @@ COPY app/ app/
 COPY telemetry/ telemetry/
 COPY data/ data/
 COPY scripts/ scripts/
+COPY scenarios/ scenarios/
 
 RUN useradd --create-home lab && mkdir -p data/out && chown lab data/out
 USER lab

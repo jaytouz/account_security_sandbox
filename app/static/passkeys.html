@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Account Lab · Passkeys</title>
+<style>
+  :root { --bg: #f7f7f8; --card: #fff; --text: #1d1d1f; --muted: #6b6b70; --line: #e2e2e6; --accent: #c62828; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151517; --card: #1f1f22; --text: #ececf0; --muted: #a0a0a8; --line: #33333a; --accent: #ef5350; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { margin: 0 0 4px; font-size: 24px; }
+  p.lead { margin: 0 0 20px; color: var(--muted); }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  h2 { margin: 0 0 10px; font-size: 16px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-top: 8px; }
+  input { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  button { padding: 8px 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--text); font: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  pre { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow: auto; }
+  .warn { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Passkeys</h1>
+  <p class="lead">Lab test page. Uses your browser's real passkey support (Windows Hello, a phone, or a security key) against the lab's fake accounts.</p>
+  <p id="hostwarn" class="warn" hidden>Open this page at <b>http://localhost:8000/lab/passkeys</b>. Passkeys don't work on 127.0.0.1.</p>
+
+  <section>
+    <h2>1. Sign in with a password</h2>
+    <label for="email">Email (a seeded @lab.test account)</label>
+    <input id="email" autocomplete="username">
+    <label for="password">Password (from data/out/seed_accounts.csv)</label>
+    <input id="password" type="password" autocomplete="current-password">
+    <div class="row">
+      <button class="primary" onclick="passwordLogin()">Sign in</button>
+      <button onclick="api('/auth/me')">Who am I?</button>
+      <button onclick="api('/auth/logout', {})">Sign out</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>2. Add a passkey to this account</h2>
+    <label for="label">Label</label>
+    <input id="label" value="this device">
+    <div class="row"><button class="primary" onclick="register()">Add passkey</button></div>
+  </section>
+
+  <section>
+    <h2>3. Make the account passkey-only</h2>
+    <div class="row">
+      <button onclick="api('/account/password-login', {enabled: false})">Turn password login off</button>
+      <button onclick="api('/account/password-login', {enabled: true})">Turn it back on</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>4. Sign in with the passkey</h2>
+    <div class="row"><button class="primary" onclick="passkeyLogin()">Sign in with passkey</button></div>
+  </section>
+
+  <pre id="log">Results appear here.</pre>
+</main>
+<script>
+  if (location.hostname !== "localhost") document.getElementById("hostwarn").hidden = false;
+
+  const enc = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const dec = s => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4)), c => c.charCodeAt(0));
+  const logEl = document.getElementById("log");
+  const log = (line, data) => { logEl.textContent = line + "\n" + JSON.stringify(data, null, 2) + "\n\n" + logEl.textContent.replace("Results appear here.", ""); };
+
+  async function api(path, body) {
+    const res = await fetch(path, {
+      method: body === undefined ? "GET" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      credentials: "same-origin",
+    });
+    const data = await res.json().catch(() => ({}));
+    log(`${res.status} ${path}`, data);
+    if (!res.ok) throw data;
+    return data;
+  }
+
+  function passwordLogin() {
+    return api("/auth/login", { email: document.getElementById("email").value, password: document.getElementById("password").value });
+  }
+
+  async function register() {
+    try {
+      const opts = await api("/account/passkeys/register/begin", {});
+      opts.challenge = dec(opts.challenge);
+      opts.user.id = dec(opts.user.id);
+      (opts.excludeCredentials || []).forEach(c => c.id = dec(c.id));
+      const cred = await navigator.credentials.create({ publicKey: opts });
+      await api("/account/passkeys/register/finish", {
+        label: document.getElementById("label").value || "passkey",
+        credential: {
+          id: cred.id, rawId: enc(cred.rawId), type: cred.type,
+          response: {
+            clientDataJSON: enc(cred.response.clientDataJSON),
+            attestationObject: enc(cred.response.attestationObject),
+            transports: cred.response.getTransports ? cred.response.getTransports() : [],
+          },
+          clientExtensionResults: cred.getClientExtensionResults(),
+          authenticatorAttachment: cred.authenticatorAttachment,
+        },
+      });
+    } catch (e) { log("Passkey registration stopped", String(e.message || e.detail?.message || e)); }
+  }
+
+  async function passkeyLogin() {
+    try {
+      const email = document.getElementById("email").value || null;
+      const opts = await api("/auth/passkey/begin", { email });
+      opts.challenge = dec(opts.challenge);
+      (opts.allowCredentials || []).forEach(c => c.id = dec(c.id));
+      const cred = await navigator.credentials.get({ publicKey: opts });
+      await api("/auth/passkey/finish", {
+        credential: {
+          id: cred.id, rawId: enc(cred.rawId), type: cred.type,
+          response: {
+            clientDataJSON: enc(cred.response.clientDataJSON),
+            authenticatorData: enc(cred.response.authenticatorData),
+            signature: enc(cred.response.signature),
+            userHandle: cred.response.userHandle ? enc(cred.response.userHandle) : null,
+          },
+          clientExtensionResults: cred.getClientExtensionResults(),
+          authenticatorAttachment: cred.authenticatorAttachment,
+        },
+      });
+    } catch (e) { log("Passkey sign-in stopped", String(e.message || e.detail?.message || e)); }
+  }
+</script>
+</body>
+</html>

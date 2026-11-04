@@ -7,6 +7,7 @@ from telemetry import events
 from .. import sessions
 from ..context import get_context
 from ..db import connection, deny
+from ..security import flags
 from ..validation import normalise_email
 
 router = APIRouter(tags=["assets"])
@@ -32,7 +33,10 @@ def trade(body: TradeIn, request: Request):
     ctx = get_context(request)
     to_email = normalise_email(body.to_email)
     with connection() as conn:
-        sess = sessions.require(conn, request)
+        sess = sessions.require(conn, request, ctx)
+        sessions.require_recent_auth(conn, sess)
+        if sess["trade_hold"] and flags.enabled("recovery.trade_cooldown"):
+            deny(conn, 403, "trade_hold", "Trades are paused for 24 hours after a recent security change.")
         item = conn.execute(
             "SELECT item_id, name, value_cents FROM app.item WHERE item_id = %s AND owner_account_id = %s "
             "FOR UPDATE",

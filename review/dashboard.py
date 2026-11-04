@@ -3,11 +3,14 @@
 Reads telemetry through the read-only lab_review role. Every action (lock,
 revoke, force reset, defence switches) goes through the app's /admin API.
 """
+import json
+
 import pandas as pd
 import streamlit as st
 
 import admin_api
 import queries as q
+import runner_api
 
 st.set_page_config(page_title="Account Lab · Review", layout="wide")
 
@@ -19,14 +22,94 @@ WINDOWS = {
     "24 hours": ("24 hours", "30 minutes"),
     "7 days": ("7 days", "6 hours"),
 }
-KINDS = ["login", "session", "change", "transfer", "alert"]
+KINDS = ["login", "session", "recovery", "change", "transfer", "alert"]
 OUTCOME_COLOURS = {"success": "#2e7d32", "failed": "#c62828", "MFA step": "#f9a825"}
 SEVERITIES = ["critical", "high", "medium", "low"]
 DEFENCE_HELP = {
     "baseline.password_policy": "At least 12 characters, and must not contain the email name.",
-    "baseline.generic_errors": "Same reply for unknown accounts and wrong passwords, "
-                               "and for reset requests on unknown emails.",
+    "baseline.generic_errors": "Same reply for unknown accounts and wrong passwords, and for reset "
+                               "or recovery requests on unknown emails.",
+    "rate_limiting.per_account": "5 failed logins on one account in 5 min → 429. Also caps MFA codes "
+                                 "(5 per challenge), wrong recovery answers and reset emails per account.",
+    "rate_limiting.per_ip": "20 failed logins from one IP in 5 min → 429. Also caps reset requests per IP.",
+    "lockout.enabled": "10 wrong passwords in a row → account locked for 15 minutes.",
+    "breached_passwords.enabled": "Reject passwords found in the local breached-password list.",
+    "mfa.reauth_for_sensitive": "Email change, MFA disable, password-login change and trades need a "
+                                "re-authentication in the last 10 minutes.",
+    "session.secure_cookies": "Cookies get Secure and SameSite=Strict.",
+    "session.revoke_on_password_change": "A password change or reset ends the account's other sessions.",
+    "session.bind_to_device": "A session used from a different device is ended.",
+    "recovery.block_security_questions": "Turn off the weak security-question recovery.",
+    "recovery.notify_on_change": "Email the owner about password, email, MFA and recovery changes.",
+    "recovery.trade_cooldown": "No trades for 24 h after a password reset, email change or recovery.",
+    "risk.step_up": "Risky password logins (new device/country, datacenter IP, impossible travel) "
+                    "need an emailed code.",
+    "monitoring.enabled": "Run the 13 monitoring rules and raise alerts.",
 }
+
+
+SECTIONS = {"mfa": "MFA", "risk": "Risk-based step-up"}
+LABELS = {
+    "rate_limiting.per_ip": "Per IP",
+    "mfa.reauth_for_sensitive": "Re-authenticate for sensitive actions",
+    "session.revoke_on_password_change": "Revoke sessions on password change",
+    "recovery.block_security_questions": "Block security-question recovery",
+    "recovery.notify_on_change": "Notify the owner of changes",
+    "risk.step_up": "Ask for a code on risky logins",
+    "monitoring.enabled": "Run detection rules",
+}
+
+
+def flat(defences: dict) -> dict[str, bool]:
+    return {f"{s}.{k}": v for s, vals in defences.items() if isinstance(vals, dict)
+            for k, v in vals.items() if isinstance(v, bool)}
+
+
+def render_scorecard(card: dict) -> None:
+    goal, alerts = card["goal"], card["alerts"]
+    verdict = card["verdict"]
+    if card["status"] == "error":
+        st.error(verdict)
+    elif goal["reached"] and not alerts["fired"]:
+        st.error(verdict)
+    elif goal["reached"]:
+        st.warning(verdict)
+    else:
+        st.success(verdict)
+    c = st.columns(4)
+    c[0].metric("Goal reached", "yes" if goal["reached"] else "no")
+    c[1].metric("Alerts fired", len(alerts["fired"]))
+    c[2].metric("Steps refused", sum(card["blocked"].values()))
+    c[3].metric("Duration", f"{card['duration_s']} s")
+    st.markdown(f"**Goal:** {goal['description']}. Result: {goal['detail'] or '-'}.")
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Alerts**")
+        rows = [{"rule": r, "expected": r in alerts["expected"], "fired": r in alerts["fired"]}
+                for r in dict.fromkeys(alerts["expected"] + alerts["fired"])]
+        if rows:
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        if not card["monitoring"]:
+            st.caption("Monitoring was off for this run, so no alerts could fire.")
+    with right:
+        st.markdown("**Attacker steps refused**")
+        if card["blocked"]:
+            st.dataframe(pd.DataFrame([{"response": k, "times": v} for k, v in card["blocked"].items()]),
+                         hide_index=True, use_container_width=True)
+            st.caption("Wrong guesses (bad_password, unknown_account) are not defences. Codes like "
+                       "rate_limited, step_up_required or session_revoked are.")
+        else:
+            st.caption("None: every attacker step went through.")
+        st.markdown("**Login results**")
+        st.dataframe(pd.DataFrame([{"result": k, "count": v} for k, v in card["login_results"].items()]),
+                     hide_index=True, use_container_width=True)
+        st.caption("Includes the account owners' normal logins.")
+    st.markdown("**Defences on:** " + (", ".join(f"`{d}`" for d in card["defences_on"]) or "none"))
+    with st.expander("Steps"):
+        for s in card["steps"]:
+            st.write("- " + s)
+        st.caption(f"run_id `{card['run_id']}`: pick it in the sidebar's Run filter to see every event.")
 
 
 def flash(key: str) -> None:
@@ -49,10 +132,15 @@ with st.sidebar:
                               help="Scenario runs and the smoke test tag their events with a run id.")
     run = None if run_choice == "All events" else "" if run_choice == "Untagged only" else run_choice
     auto = st.toggle("Auto-refresh live view (5 s)", value=True)
+    mon = q.monitor_state()
+    if mon.get("enabled"):
+        st.caption(f"Monitoring on · last pass {mon['seconds_ago']} s ago · {mon['alerts_raised']} alerts raised")
+    else:
+        st.caption("Monitoring off: turn it on in the Defences tab.")
     st.caption("Times are UTC.")
 
-live_tab, accounts_tab, alerts_tab, runs_tab, defences_tab = st.tabs(
-    ["Live", "Accounts", "Alerts", "Runs", "Defences"])
+live_tab, scenarios_tab, accounts_tab, alerts_tab, runs_tab, defences_tab = st.tabs(
+    ["Live", "Scenarios", "Accounts", "Alerts", "Runs", "Defences"])
 
 
 # ---------------------------------------------------------------- live
@@ -97,6 +185,50 @@ with live_tab:
     st.fragment(run_every="5s" if auto else None)(live_view)()
 
 
+# ---------------------------------------------------------------- scenarios
+with scenarios_tab:
+    try:
+        catalog = runner_api.scenarios()
+    except runner_api.RunnerError as exc:
+        st.error(str(exc))
+        catalog = []
+    if catalog:
+        st.caption("Each scenario creates its own fake accounts, plays the real owner first, then replays a "
+                   "suspicious pattern against the app, inside the lab only. Change defences in the Defences "
+                   "tab and run it again to compare.")
+        if not mon.get("enabled"):
+            st.info("Monitoring is off, so no alerts will fire. Turn on monitoring.enabled in the Defences tab.")
+        by_name = {s["name"]: s for s in catalog}
+        name = st.selectbox("Scenario", list(by_name), format_func=lambda n: by_name[n]["title"])
+        s = by_name[name]
+        st.write(s["summary"])
+        c1, c2 = st.columns(2)
+        c1.markdown(f"**Attacker goal:** {s['goal']}  \n**Leaves behind:** {s['signals']}")
+        c2.markdown("**Should raise:** " + ", ".join(f"`{a}`" for a in s["expected_alerts"])
+                    + "  \n**Countered by:** " + ", ".join(f"`{d}`" for d in s["countered_by"]))
+        if st.button("Run scenario", type="primary"):
+            with st.spinner(f"Running {s['title']}…"):
+                try:
+                    st.session_state["last_card"] = runner_api.run(name)
+                except runner_api.RunnerError as exc:
+                    st.error(str(exc))
+        card = st.session_state.get("last_card")
+        if card and card["scenario"] == name:
+            st.subheader("Result")
+            render_scorecard(card)
+
+    st.subheader("Past scenario runs")
+    past = q.scenario_runs()
+    if past.empty:
+        st.caption("No scenario runs yet.")
+    else:
+        st.dataframe(past.drop(columns=["scorecard"]), hide_index=True, use_container_width=True)
+        pick = st.selectbox("Open a past scorecard", past["run_id"])
+        raw = past.set_index("run_id").loc[pick, "scorecard"]
+        if raw:
+            render_scorecard(json.loads(raw))
+
+
 # ---------------------------------------------------------------- accounts
 def act(fn, account_id: str, done: str) -> None:
     try:
@@ -135,6 +267,11 @@ with accounts_tab:
         c[2].metric("Live sessions", s["live_sessions"])
         c[3].metric(f"Failed logins ({window_label})", s["failures"])
         c[4].metric("Last login (UTC)", s["last_login"] or "never")
+        c = st.columns(5)
+        c[0].metric("Passkeys", s["passkeys"])
+        c[1].metric("Password login", "off" if s["passkey_only"] else "on")
+        c[2].metric("Temp. locked until", s["locked_until"] or "-")
+        c[3].metric("Trade hold until", s["trade_hold_until"] or "-")
 
         st.markdown("**Respond**")
         b = st.columns(3)
@@ -177,7 +314,7 @@ with alerts_tab:
     for i, sev in enumerate(SEVERITIES):
         c[i].metric(sev.capitalize(), int(counts.get(sev, 0)))
     if alerts.empty:
-        st.info("No alerts in this window. Monitoring rules that raise alerts arrive in Phase 4.")
+        st.info("No alerts in this window. Alerts need monitoring.enabled on (Defences tab).")
     else:
         pick = st.multiselect("Severity", SEVERITIES, default=SEVERITIES)
         st.dataframe(alerts[alerts["severity"].isin(pick)], hide_index=True, use_container_width=True)
@@ -187,7 +324,7 @@ with alerts_tab:
 with runs_tab:
     runs = q.runs()
     if runs.empty:
-        st.info("No tagged runs yet. Scenario runs (Phase 3) and the smoke test tag their events.")
+        st.info("No tagged runs yet. Scenario runs and the smoke test tag their events.")
     else:
         st.dataframe(runs, hide_index=True, use_container_width=True)
 
@@ -241,7 +378,7 @@ with defences_tab:
     for section, flags in current.items():
         if not isinstance(flags, dict):
             continue
-        st.subheader(section.replace("_", " ").capitalize())
+        st.subheader(SECTIONS.get(section, section.replace("_", " ").capitalize()))
         for key, value in flags.items():
             if not isinstance(value, bool):
                 continue
@@ -249,11 +386,11 @@ with defences_tab:
             widget_key = f"flag:{path}"
             # Always show the value the app reports, not a stale widget state.
             st.session_state[widget_key] = value
-            st.toggle(key.replace("_", " ").capitalize(), key=widget_key, on_change=flip_defence,
-                      args=(path,), help=DEFENCE_HELP.get(path, path))
+            st.toggle(LABELS.get(path, key.replace("_", " ").capitalize()), key=widget_key,
+                      on_change=flip_defence, args=(path,), help=DEFENCE_HELP.get(path, path))
 
     st.caption("Changes apply from the app's next request and are logged below. "
-               "More defences arrive in Phase 4.")
+               "Hover the ? next to a switch for what it does.")
     st.subheader("Change history")
     history = q.defence_history()
     if history.empty:

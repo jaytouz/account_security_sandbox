@@ -1,4 +1,4 @@
-"""End-to-end check of the Phase 1 flows against the local app. Standard library only.
+"""End-to-end check of the account-service flows and admin API. Standard library only.
 
     docker compose exec app python scripts/smoke_test.py    # inside the lab
     python scripts/smoke_test.py                            # from the host (sim headers get stripped)
@@ -20,16 +20,17 @@ RUN_ID = f"smoke-{secrets.token_hex(3)}"
 
 
 class Client:
-    def __init__(self):
+    def __init__(self, default_headers=None):
         self.jar = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar))
+        self.default_headers = default_headers or {}
 
     def call(self, method, path, body=None, headers=None):
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(BASE + path, data=data, method=method)
         req.add_header("Content-Type", "application/json")
         req.add_header("X-Lab-Run-Id", RUN_ID)
-        for k, v in (headers or {}).items():
+        for k, v in {**self.default_headers, **(headers or {})}.items():
             req.add_header(k, v)
         try:
             with self.opener.open(req, timeout=10) as r:
@@ -75,7 +76,8 @@ check("unknown account rejected", s == 401, r)
 sim = {"X-Lab-Sim-IP": "203.0.113.10", "X-Lab-Sim-ASN": "64500",
        "X-Lab-Sim-IP-Type": "residential", "X-Lab-Sim-Geo": "FR;48.85;2.35",
        "X-Lab-Sim-Device": "smoke-laptop"}
-s, r = a.call("POST", "/auth/login", {"email": ea, "password": pw}, sim); check("login A", s == 200, r)
+a.default_headers = sim   # one consistent (simulated) device for A from here on
+s, r = a.call("POST", "/auth/login", {"email": ea, "password": pw}); check("login A", s == 200, r)
 s, r = a.call("GET", "/auth/me"); check("me A", s == 200 and r["email"] == ea, r)
 s, r = b.call("GET", "/auth/me"); check("me without session rejected", s == 401, r)
 
